@@ -1,0 +1,75 @@
+diff --git a/PC/launcher.c b/PC/launcher.c
+index f5b225a..e887121 100644
+--- a/PC/launcher.c
++++ b/PC/launcher.c
+@@ -10,6 +10,7 @@
+ 
+ #include <windows.h>
+ #include <shlobj.h>
++#include <shlwapi.h>
+ #include <stdio.h>
+ #include <tchar.h>
+ 
+@@ -427,6 +428,10 @@ compare_pythons(const void * p1, const void * p2)
+     /* note reverse sorting on version */
+     int result = CompareStringW(LOCALE_INVARIANT, SORT_DIGITSASNUMBERS,
+                                 ip2->version, -1, ip1->version, -1);
++    if (!result && GetLastError() == ERROR_INVALID_FLAGS) {
++        // Windows Vista does not support SORT_DIGITSASNUMBERS
++        result = StrCmpLogicalW(ip2->version, ip1->version) + 2;
++    }
+     switch (result) {
+     case 0:
+         error(0, L"CompareStringW failed");
+diff --git a/PCbuild/pylauncher.vcxproj b/PCbuild/pylauncher.vcxproj
+index 550e084..b0f05e3 100644
+--- a/PCbuild/pylauncher.vcxproj
++++ b/PCbuild/pylauncher.vcxproj
+@@ -95,7 +95,7 @@
+       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+     </ClCompile>
+     <Link>
+-      <AdditionalDependencies>version.lib;%(AdditionalDependencies)</AdditionalDependencies>
++      <AdditionalDependencies>version.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <SubSystem>Console</SubSystem>
+     </Link>
+   </ItemDefinitionGroup>
+diff --git a/PCbuild/pywlauncher.vcxproj b/PCbuild/pywlauncher.vcxproj
+index 44e3fc2..35ca8e7 100644
+--- a/PCbuild/pywlauncher.vcxproj
++++ b/PCbuild/pywlauncher.vcxproj
+@@ -95,7 +95,7 @@
+       <RuntimeLibrary>MultiThreaded</RuntimeLibrary>
+     </ClCompile>
+     <Link>
+-      <AdditionalDependencies>version.lib;%(AdditionalDependencies)</AdditionalDependencies>
++      <AdditionalDependencies>version.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <SubSystem>Windows</SubSystem>
+     </Link>
+   </ItemDefinitionGroup>
+diff --git a/PCbuild/venvlauncher.vcxproj b/PCbuild/venvlauncher.vcxproj
+index 123e84e..0c86e5f 100644
+--- a/PCbuild/venvlauncher.vcxproj
++++ b/PCbuild/venvlauncher.vcxproj
+@@ -98,7 +98,7 @@
+       <PreprocessorDefinitions>PY_ICON;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ResourceCompile>
+     <Link>
+-      <AdditionalDependencies>version.lib;%(AdditionalDependencies)</AdditionalDependencies>
++      <AdditionalDependencies>version.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <SubSystem>Console</SubSystem>
+     </Link>
+   </ItemDefinitionGroup>
+diff --git a/PCbuild/venvwlauncher.vcxproj b/PCbuild/venvwlauncher.vcxproj
+index b8504d5..2f8b170 100644
+--- a/PCbuild/venvwlauncher.vcxproj
++++ b/PCbuild/venvwlauncher.vcxproj
+@@ -98,7 +98,7 @@
+       <PreprocessorDefinitions>PYW_ICON;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ResourceCompile>
+     <Link>
+-      <AdditionalDependencies>version.lib;%(AdditionalDependencies)</AdditionalDependencies>
++      <AdditionalDependencies>version.lib;shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+       <SubSystem>Windows</SubSystem>
+     </Link>
+   </ItemDefinitionGroup>

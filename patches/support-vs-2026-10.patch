@@ -1,0 +1,34 @@
+diff --git a/PCbuild/python.props b/PCbuild/python.props
+--- a/PCbuild/python.props
++++ b/PCbuild/python.props
+@@ -11,6 +11,7 @@
+ 
+     We set BasePlatformToolset for ICC's benefit, it's otherwise ignored.
+     -->
++    <BasePlatformToolset Condition="'$(BasePlatformToolset)' == '' and '$(VisualStudioVersion)' == '18.0'">v145</BasePlatformToolset>
+     <BasePlatformToolset Condition="'$(BasePlatformToolset)' == '' and '$(VisualStudioVersion)' == '17.0'">v143</BasePlatformToolset>
+     <BasePlatformToolset Condition="'$(BasePlatformToolset)' == '' and '$(VisualStudioVersion)' == '16.0'">v142</BasePlatformToolset>
+     <BasePlatformToolset Condition="'$(BasePlatformToolset)' == '' and ('$(MSBuildToolsVersion)' == '15.0' or '$(VisualStudioVersion)' == '15.0')">v141</BasePlatformToolset>
+diff --git a/PCbuild/pythoncore.vcxproj b/PCbuild/pythoncore.vcxproj
+--- a/PCbuild/pythoncore.vcxproj
++++ b/PCbuild/pythoncore.vcxproj
+@@ -544,7 +544,7 @@
+       </ClCompile>
+     </ItemGroup>
+   </Target>
+-  <Target Name="_WarnAboutToolset" BeforeTargets="PrepareForBuild" Condition="$(PlatformToolset) != 'v140' and $(PlatformToolset) != 'v141' and $(PlatformToolset) != 'v142' and $(PlatformToolset) != 'v143'">
++  <Target Name="_WarnAboutToolset" BeforeTargets="PrepareForBuild" Condition="$(PlatformToolset) != 'v140' and $(PlatformToolset) != 'v141' and $(PlatformToolset) != 'v142' and $(PlatformToolset) != 'v143' and $(PlatformToolset) != 'v145'">
+     <Warning Text="Toolset $(PlatformToolset) is not used for official builds. Your build may have errors or incompatibilities." />
+   </Target>
+   <Target Name="_WarnAboutZlib" BeforeTargets="PrepareForBuild" Condition="!$(IncludeExternals)">
+diff --git a/Tools/msi/bundle/bootstrap/pythonba.vcxproj b/Tools/msi/bundle/bootstrap/pythonba.vcxproj
+--- a/Tools/msi/bundle/bootstrap/pythonba.vcxproj
++++ b/Tools/msi/bundle/bootstrap/pythonba.vcxproj
+@@ -22,6 +22,7 @@
+     <Configuration Condition="'$(Configuration)' == ''">Release</Configuration>
+     <Platform Condition="'$(Platform)' == ''">Win32</Platform>
+     <!-- v143 is not supported by the version of WiX Toolset obtained by get_externals.bat -->
++    <PlatformToolset Condition="'$(PlatformToolset)' == '' and '$(VisualStudioVersion)' == '18.0'">v145</PlatformToolset>
+     <PlatformToolset Condition="'$(PlatformToolset)' == '' and '$(VisualStudioVersion)' == '17.0'">v143</PlatformToolset>
+     <PlatformToolset Condition="'$(PlatformToolset)' == '' and '$(VisualStudioVersion)' == '16.0'">v142</PlatformToolset>
+     <PlatformToolset Condition="'$(PlatformToolset)' == '' and ('$(MSBuildToolsVersion)' == '15.0' or '$(VisualStudioVersion)' == '15.0')">v141</PlatformToolset>

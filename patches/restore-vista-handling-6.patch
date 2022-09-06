@@ -1,0 +1,984 @@
+diff --git a/Include/internal/pycore_runtime.h b/Include/internal/pycore_runtime.h
+--- a/Include/internal/pycore_runtime.h
++++ b/Include/internal/pycore_runtime.h
+@@ -21,6 +21,7 @@ extern "C" {
+ #include "pycore_pymem.h"           // struct _pymem_allocators
+ #include "pycore_pythread.h"        // struct _pythread_runtime_state
+ #include "pycore_signal.h"          // struct _signals_runtime_state
++#include "pycore_time.h"            // struct _PyTime_runtime_state
+ #include "pycore_tracemalloc.h"     // struct _tracemalloc_runtime_state
+ #include "pycore_typeobject.h"      // struct _types_runtime_state
+ #include "pycore_unicodeobject.h"   // struct _Py_unicode_runtime_state
+@@ -328,6 +329,7 @@ typedef struct pyruntimestate {
+     struct _Py_float_runtime_state float_state;
+     struct _Py_unicode_runtime_state unicode_state;
+     struct _types_runtime_state types;
++    struct _Py_time_runtime_state time;
+ 
+     /* All the objects that are shared by the runtime's interpreters. */
+     struct _Py_cached_objects cached_objects;
+diff --git a/Include/internal/pycore_time.h b/Include/internal/pycore_time.h
+--- a/Include/internal/pycore_time.h
++++ b/Include/internal/pycore_time.h
+@@ -331,6 +331,24 @@ extern double _PyTimeFraction_Resolution(
+     const _PyTimeFraction *frac);
+ 
+ 
++// --- _Py_time_runtime_state ------------------------------------------------
++
++#ifdef MS_WINDOWS
++#define WIN32_LEAN_AND_MEAN
++#include <windows.h>
++typedef VOID(WINAPI *GetSystemTimePreciseAsFileTimeFunc)(LPFILETIME lpSystemTimeAsFileTime);
++#endif
++
++struct _Py_time_runtime_state {
++#ifdef MS_WINDOWS
++    GetSystemTimePreciseAsFileTimeFunc Py_GetSystemTimePreciseAsFileTime;
++#else
++    char _unused;
++#endif
++};
++
++extern PyStatus _PyTime_Init(struct _Py_time_runtime_state *state);
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/Lib/_pyrepl/main.py b/Lib/_pyrepl/main.py
+--- a/Lib/_pyrepl/main.py
++++ b/Lib/_pyrepl/main.py
+@@ -5,20 +5,23 @@ import sys
+ 
+ CAN_USE_PYREPL: bool
+ FAIL_REASON: str
+-try:
+-    if sys.platform == "win32" and sys.getwindowsversion().build < 10586:
+-        raise RuntimeError("Windows 10 TH2 or later required")
+-    if not os.isatty(sys.stdin.fileno()):
+-        raise OSError(errno.ENOTTY, "tty required", "stdin")
+-    from .simple_interact import check
+-    if err := check():
+-        raise RuntimeError(err)
+-except Exception as e:
++if sys.platform == "win32" and sys.getwindowsversion().build < 10586:
++    # Windows 10 TH2 or later required
+     CAN_USE_PYREPL = False
+-    FAIL_REASON = f"warning: can't use pyrepl: {e}"
+-else:
+-    CAN_USE_PYREPL = True
+     FAIL_REASON = ""
++else:
++    try:
++        if not os.isatty(sys.stdin.fileno()):
++            raise OSError(errno.ENOTTY, "tty required", "stdin")
++        from .simple_interact import check
++        if err := check():
++            raise RuntimeError(err)
++    except Exception as e:
++        CAN_USE_PYREPL = False
++        FAIL_REASON = f"warning: can't use pyrepl: {e}"
++    else:
++        CAN_USE_PYREPL = True
++        FAIL_REASON = ""
+ 
+ 
+ def interactive_console(mainmodule=None, quiet=False, pythonstartup=False):
+diff --git a/Modules/_winapi.c b/Modules/_winapi.c
+--- a/Modules/_winapi.c
++++ b/Modules/_winapi.c
+@@ -112,8 +112,11 @@
+ #define STARTF_UNTRUSTEDSOURCE 0x00008000
+ #endif
+ 
++typedef HRESULT(WINAPI *CopyFile2Func)(PCWSTR pwszExistingFileName, PCWSTR pwszNewFileName, COPYFILE2_EXTENDED_PARAMETERS *pExtendedParameters);
++
+ typedef struct {
+     PyTypeObject *overlapped_type;
++    CopyFile2Func Py_CopyFile2;
+ } WinApiState;
+ 
+ static inline WinApiState*
+@@ -2931,7 +2934,7 @@ _winapi_CopyFile2_impl(PyObject *module, LPCWSTR existing_file_name,
+     }
+     */
+     Py_BEGIN_ALLOW_THREADS;
+-    hr = CopyFile2(existing_file_name, new_file_name, &params);
++    hr = winapi_get_state(module)->Py_CopyFile2(existing_file_name, new_file_name, &params);
+     Py_END_ALLOW_THREADS;
+     /* For future implementation.
+     if (progress_routine != Py_None) {
+@@ -2995,6 +2998,10 @@ static PyMethodDef winapi_functions[] = {
+     _WINAPI_GETFILETYPE_METHODDEF
+     _WINAPI__MIMETYPES_READ_WINDOWS_REGISTRY_METHODDEF
+     _WINAPI_NEEDCURRENTDIRECTORYFOREXEPATH_METHODDEF
++    {NULL, NULL}
++};
++
++static PyMethodDef winapi_functions_copyfile2[] = {
+     _WINAPI_COPYFILE2_METHODDEF
+     {NULL, NULL}
+ };
+@@ -3025,6 +3032,14 @@ static int winapi_exec(PyObject *m)
+         return -1;
+     }
+ 
++    HMODULE hKernel32 = GetModuleHandleW(L"kernel32");
++    if (!hKernel32) return -1;
++    if ((st->Py_CopyFile2 = (CopyFile2Func)GetProcAddress(hKernel32, "CopyFile2")) != NULL &&
++        PyModule_AddFunctions(m, winapi_functions_copyfile2) < 0)
++    {
++        return -1;
++    }
++
+     PyObject *d = PyModule_GetDict(m);
+ 
+     /* constants */
+diff --git a/Modules/posixmodule.c b/Modules/posixmodule.c
+--- a/Modules/posixmodule.c
++++ b/Modules/posixmodule.c
+@@ -1080,6 +1080,14 @@ dir_fd_converter(PyObject *o, void *p)
+     }
+ }
+ 
++#ifdef MS_WINDOWS
++#include <processsnapshot.h>
++typedef DWORD(WINAPI *GetActiveProcessorCountFunc)(WORD GroupNumber);
++typedef DWORD(WINAPI *PssCaptureSnapshotFunc)(HANDLE ProcessHandle, PSS_CAPTURE_FLAGS CaptureFlags, DWORD ThreadContextFlags, HPSS *SnapshotHandle);
++typedef DWORD(WINAPI *PssQuerySnapshotFunc)(HPSS SnapshotHandle, PSS_QUERY_INFORMATION_CLASS InformationClass, void *Buffer, DWORD BufferLength);
++typedef DWORD(WINAPI *PssFreeSnapshotFunc)(HANDLE ProcessHandle, HPSS SnapshotHandle);
++#endif
++
+ typedef struct {
+     PyObject *billion;
+     PyObject *DirEntryType;
+@@ -1104,6 +1112,12 @@ typedef struct {
+     // times() clock frequency in hertz; used by os.times()
+     long ticks_per_second;
+ #endif
++#ifdef MS_WINDOWS
++    GetActiveProcessorCountFunc Py_GetActiveProcessorCount;
++    PssCaptureSnapshotFunc Py_PssCaptureSnapshot;
++    PssQuerySnapshotFunc Py_PssQuerySnapshot;
++    PssFreeSnapshotFunc Py_PssFreeSnapshot;
++#endif
+ } _posixstate;
+ 
+ 
+@@ -9291,7 +9305,6 @@ os_setpgrp_impl(PyObject *module)
+ 
+ #ifdef MS_WINDOWS
+ #include <winternl.h>
+-#include <ProcessSnapshot.h>
+ 
+ // The structure definition in winternl.h may be incomplete.
+ // This structure is the full version from the MSDN documentation.
+@@ -9367,7 +9380,7 @@ win32_getppid_fast(void)
+ }
+ 
+ static PyObject*
+-win32_getppid(void)
++win32_getppid(PyObject *module)
+ {
+     DWORD error;
+     PyObject* result = NULL;
+@@ -9381,24 +9394,31 @@ win32_getppid(void)
+     }
+ 
+     // If failure occurs in win32_getppid_fast(), fall back to using the PSS API.
++    _posixstate *st = get_posix_state(module);
++    PssCaptureSnapshotFunc Py_PssCaptureSnapshot = st->Py_PssCaptureSnapshot;
++    PssQuerySnapshotFunc Py_PssQuerySnapshot = st->Py_PssQuerySnapshot;
++    PssFreeSnapshotFunc Py_PssFreeSnapshot = st->Py_PssFreeSnapshot;
++    if (Py_PssCaptureSnapshot) {
++        error = Py_PssCaptureSnapshot(process, PSS_CAPTURE_NONE, 0, &snapshot);
++        if (error != ERROR_SUCCESS) {
++            return PyErr_SetFromWindowsErr(error);
++        }
+ 
+-    error = PssCaptureSnapshot(process, PSS_CAPTURE_NONE, 0, &snapshot);
+-    if (error != ERROR_SUCCESS) {
+-        return PyErr_SetFromWindowsErr(error);
+-    }
++        PSS_PROCESS_INFORMATION info;
++        error = Py_PssQuerySnapshot(snapshot, PSS_QUERY_PROCESS_INFORMATION, &info,
++            sizeof(info));
++        if (error == ERROR_SUCCESS) {
++            result = PyLong_FromUnsignedLong(info.ParentProcessId);
++        } else {
++            result = PyErr_SetFromWindowsErr(error);
++        }
+ 
+-    PSS_PROCESS_INFORMATION info;
+-    error = PssQuerySnapshot(snapshot, PSS_QUERY_PROCESS_INFORMATION, &info,
+-                             sizeof(info));
+-    if (error == ERROR_SUCCESS) {
+-        result = PyLong_FromUnsignedLong(info.ParentProcessId);
+-    }
+-    else {
+-        result = PyErr_SetFromWindowsErr(error);
++        Py_PssFreeSnapshot(process, snapshot);
++        return result;
++    } else {
++        PyErr_SetString(PyExc_OSError, "unable to obtain parent PID");
++        return NULL;
+     }
+-
+-    PssFreeSnapshot(process, snapshot);
+-    return result;
+ }
+ #endif /*MS_WINDOWS*/
+ 
+@@ -9417,7 +9437,7 @@ os_getppid_impl(PyObject *module)
+ /*[clinic end generated code: output=43b2a946a8c603b4 input=e637cb87539c030e]*/
+ {
+ #ifdef MS_WINDOWS
+-    return win32_getppid();
++    return win32_getppid(module);
+ #else
+     return PyLong_FromPid(getppid());
+ #endif
+@@ -15323,7 +15343,14 @@ os_cpu_count_impl(PyObject *module)
+     int ncpu = 0;
+ #ifdef MS_WINDOWS
+ # ifdef MS_WINDOWS_DESKTOP
+-    ncpu = GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
++    GetActiveProcessorCountFunc Py_GetActiveProcessorCount = get_posix_state(module)->Py_GetActiveProcessorCount;
++    if (Py_GetActiveProcessorCount) {
++        ncpu = Py_GetActiveProcessorCount(ALL_PROCESSOR_GROUPS);
++    } else {
++        SYSTEM_INFO sysinfo;
++        GetSystemInfo(&sysinfo);
++        ncpu = sysinfo.dwNumberOfProcessors;
++    }
+ # else
+     ncpu = 0;
+ # endif
+@@ -18024,6 +18051,21 @@ posixmodule_exec(PyObject *m)
+     if (state->st_mode == NULL)
+         return -1;
+ 
++#ifdef MS_WINDOWS
++    HMODULE hKernel32 = GetModuleHandleW(L"kernel32");
++    if (hKernel32) {
++        state->Py_GetActiveProcessorCount = (GetActiveProcessorCountFunc)GetProcAddress(hKernel32, "GetActiveProcessorCount");
++        state->Py_PssCaptureSnapshot = (PssCaptureSnapshotFunc)GetProcAddress(hKernel32, "PssCaptureSnapshot");
++        state->Py_PssQuerySnapshot = (PssQuerySnapshotFunc)GetProcAddress(hKernel32, "PssQuerySnapshot");
++        state->Py_PssFreeSnapshot = (PssFreeSnapshotFunc)GetProcAddress(hKernel32, "PssFreeSnapshot");
++        if (!state->Py_PssCaptureSnapshot || !state->Py_PssQuerySnapshot || !state->Py_PssFreeSnapshot) {
++            state->Py_PssCaptureSnapshot = NULL;
++            state->Py_PssQuerySnapshot = NULL;
++            state->Py_PssFreeSnapshot = NULL;
++        }
++    }
++#endif
++
+     /* suppress "function not used" warnings */
+     {
+     int ignored;
+diff --git a/Modules/socketmodule.c b/Modules/socketmodule.c
+--- a/Modules/socketmodule.c
++++ b/Modules/socketmodule.c
+@@ -5488,15 +5488,29 @@ sock_initobj_impl(PySocketSockObject *self, int family, int type, int proto,
+         }
+ #ifdef MS_WINDOWS
+         Py_BEGIN_ALLOW_THREADS
+-        fd = WSASocketW(family, type, proto,
+-                        NULL, 0,
+-                        WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
++        if (IsWindows7SP1OrGreater()) {
++            // WSA_FLAG_NO_HANDLE_INHERIT is supported
++            fd = WSASocketW(family, type, proto,
++                NULL, 0,
++                WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT);
++        } else {
++            fd = socket(family, type, proto);
++        }
+         Py_END_ALLOW_THREADS
+ 
+         if (fd == INVALID_SOCKET) {
+             set_error();
+             return -1;
+         }
++
++        if (!IsWindows7SP1OrGreater()) {
++            // WSA_FLAG_NO_HANDLE_INHERIT is not supported
++            if (!SetHandleInformation((HANDLE)fd, HANDLE_FLAG_INHERIT, 0)) {
++                closesocket(fd);
++                PyErr_SetFromWindowsErr(0);
++                return -1;
++            }
++        }
+ #else
+         /* UNIX */
+         Py_BEGIN_ALLOW_THREADS
+diff --git a/Modules/timemodule.c b/Modules/timemodule.c
+--- a/Modules/timemodule.c
++++ b/Modules/timemodule.c
+@@ -71,9 +71,13 @@ module time
+ 
+ 
+ /* Forward declarations */
+-static int pysleep(PyTime_t timeout);
++static int pysleep(PyObject *self, PyTime_t timeout);
+ 
+ 
++#ifdef MS_WINDOWS
++typedef BOOL(WINAPI *SetWaitableTimerExFunc)(HANDLE hTimer, const LARGE_INTEGER *lpDueTime, LONG lPeriod, PTIMERAPCROUTINE pfnCompletionRoutine, LPVOID lpArgToCompletionRoutine, PREASON_CONTEXT WakeContext, ULONG TolerableDelay);
++#endif
++
+ typedef struct {
+     PyTypeObject *struct_time_type;
+ // gh-115714: Don't use times() on WASI.
+@@ -85,6 +89,9 @@ typedef struct {
+     // clock() frequency in hertz
+     _PyTimeFraction clock_base;
+ #endif
++#ifdef MS_WINDOWS
++    SetWaitableTimerExFunc Py_SetWaitableTimerEx;
++#endif
+ } time_module_state;
+ 
+ static inline time_module_state*
+@@ -403,7 +410,7 @@ time_sleep(PyObject *self, PyObject *timeout_obj)
+                         "sleep length must be non-negative");
+         return NULL;
+     }
+-    if (pysleep(timeout) != 0) {
++    if (pysleep(self, timeout) != 0) {
+         return NULL;
+     }
+     Py_RETURN_NONE;
+@@ -2083,6 +2090,10 @@ time_exec(PyObject *module)
+             CloseHandle(timer);
+         }
+     }
++
++    HMODULE hKernel32 = GetModuleHandleW(L"kernel32");
++    if (hKernel32)
++        state->Py_SetWaitableTimerEx = (SetWaitableTimerExFunc)GetProcAddress(hKernel32, "SetWaitableTimerEx");
+ #endif
+ 
+ // gh-115714: Don't use times() on WASI.
+@@ -2167,7 +2178,7 @@ PyInit_time(void)
+ // On error, raise an exception and return -1.
+ // On success, return 0.
+ static int
+-pysleep(PyTime_t timeout)
++pysleep(PyObject *self, PyTime_t timeout)
+ {
+     assert(timeout >= 0);
+ 
+@@ -2276,12 +2287,29 @@ pysleep(PyTime_t timeout)
+         return -1;
+     }
+ 
+-    if (!SetWaitableTimerEx(timer, &relative_timeout,
+-                            0, // no period; the timer is signaled once
+-                            NULL, NULL, // no completion routine
+-                            NULL,  // no wake context; do not resume from suspend
+-                            0)) // no tolerable delay for timer coalescing
+-    {
++    BOOL result;
++    SetWaitableTimerExFunc Py_SetWaitableTimerEx = get_time_state(self)->Py_SetWaitableTimerEx;
++    if (Py_SetWaitableTimerEx) {
++        result = Py_SetWaitableTimerEx(
++            timer, &relative_timeout,
++            0, // no period; the timer is signaled once
++            NULL, NULL, // no completion routine
++            NULL,  // no wake context; do not resume from suspend
++            0 // no tolerable delay for timer coalescing
++        );
++    } else {
++        result = SetWaitableTimer(
++            timer, &relative_timeout,
++            // period: the timer is signaled once
++            0,
++            // no completion routine
++            NULL, NULL,
++            // Don't restore a system in suspended power
++            // conservation mode when the timer is signaled.
++            FALSE
++        );
++    }
++    if (!result) {
+         PyErr_SetFromWindowsErr(0);
+         goto error;
+     }
+diff --git a/Python/fileutils.c b/Python/fileutils.c
+--- a/Python/fileutils.c
++++ b/Python/fileutils.c
+@@ -1492,11 +1492,17 @@ set_inheritable(int fd, int inheritable, int raise, int *atomic_flag_works)
+     else
+         flags = 0;
+ 
+-    if (!SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags)) {
++    /* This check can be removed once support for Windows 7 ends. */
++#define CONSOLE_PSEUDOHANDLE(handle) (((ULONG_PTR)(handle) & 0x3) == 0x3 && \
++        GetFileType(handle) == FILE_TYPE_CHAR)
++
++    if (!CONSOLE_PSEUDOHANDLE(handle) &&
++        !SetHandleInformation(handle, HANDLE_FLAG_INHERIT, flags)) {
+         if (raise)
+             PyErr_SetFromWindowsErr(0);
+         return -1;
+     }
++#undef CONSOLE_PSEUDOHANDLE
+     return 0;
+ 
+ #else
+diff --git a/Python/pystate.c b/Python/pystate.c
+--- a/Python/pystate.c
++++ b/Python/pystate.c
+@@ -19,6 +19,7 @@
+ #include "pycore_pystate.h"
+ #include "pycore_runtime_init.h"  // _PyRuntimeState_INIT
+ #include "pycore_sysmodule.h"     // _PySys_Audit()
++#include "pycore_time.h"          // _PyTime_Init()
+ #include "pycore_obmalloc.h"      // _PyMem_obmalloc_state_on_heap()
+ 
+ /* --------------------------------------------------------------------------
+@@ -459,6 +460,11 @@ _PyRuntimeState_Init(_PyRuntimeState *runtime)
+         assert(!runtime->_initialized);
+     }
+ 
++    PyStatus status = _PyTime_Init(&runtime->time);
++    if (_PyStatus_EXCEPTION(status)) {
++        return status;
++    }
++
+     if (gilstate_tss_init(runtime) != 0) {
+         _PyRuntimeState_Fini(runtime);
+         return _PyStatus_NO_MEMORY();
+diff --git a/Python/pytime.c b/Python/pytime.c
+--- a/Python/pytime.c
++++ b/Python/pytime.c
+@@ -1,4 +1,6 @@
+ #include "Python.h"
++#include "pycore_initconfig.h"    // _PyStatus_Ok()
++#include "pycore_runtime.h"       // _PyRuntime
+ #include "pycore_time.h"          // PyTime_t
+ 
+ #include <time.h>                 // gmtime_r()
+@@ -7,6 +9,7 @@
+ #endif
+ #ifdef MS_WINDOWS
+ #  include <winsock2.h>           // struct timeval
++#  include <windows.h>
+ #endif
+ 
+ #if defined(__APPLE__)
+@@ -893,6 +896,18 @@ _PyTime_AsTimespec(PyTime_t t, struct timespec *ts)
+ #endif
+ 
+ 
++PyStatus
++_PyTime_Init(struct _Py_time_runtime_state *state)
++{
++#ifdef MS_WINDOWS
++    HMODULE hKernel32 = GetModuleHandleW(L"kernel32");
++    if (hKernel32) {
++        state->Py_GetSystemTimePreciseAsFileTime = (GetSystemTimePreciseAsFileTimeFunc)GetProcAddress(hKernel32, "GetSystemTimePreciseAsFileTime");
++    }
++#endif
++    return PyStatus_Ok();
++}
++
+ // N.B. If raise_exc=0, this may be called without the GIL.
+ static int
+ py_get_system_clock(PyTime_t *tp, _Py_clock_info_t *info, int raise_exc)
+@@ -907,7 +922,12 @@ py_get_system_clock(PyTime_t *tp, _Py_clock_info_t *info, int raise_exc)
+     FILETIME system_time;
+     ULARGE_INTEGER large;
+ 
+-    GetSystemTimePreciseAsFileTime(&system_time);
++    GetSystemTimePreciseAsFileTimeFunc Py_GetSystemTimePreciseAsFileTime = _PyRuntime.time.Py_GetSystemTimePreciseAsFileTime;
++    if (Py_GetSystemTimePreciseAsFileTime) {
++        Py_GetSystemTimePreciseAsFileTime(&system_time);
++    } else {
++        GetSystemTimeAsFileTime(&system_time);
++    }
+     large.u.LowPart = system_time.dwLowDateTime;
+     large.u.HighPart = system_time.dwHighDateTime;
+     /* 11,644,473,600,000,000,000: number of nanoseconds between
+@@ -916,17 +936,32 @@ py_get_system_clock(PyTime_t *tp, _Py_clock_info_t *info, int raise_exc)
+     PyTime_t ns = large.QuadPart * 100 - 11644473600000000000;
+     *tp = ns;
+     if (info) {
+-        // GetSystemTimePreciseAsFileTime() is implemented using
+-        // QueryPerformanceCounter() internally.
+-        if (py_qpc_base.denom == 0) {
+-            if (py_win_perf_counter_frequency(&py_qpc_base, raise_exc) < 0) {
++        if (Py_GetSystemTimePreciseAsFileTime) {
++            // GetSystemTimePreciseAsFileTime() is implemented using
++            // QueryPerformanceCounter() internally.
++            if (py_qpc_base.denom == 0) {
++                if (py_win_perf_counter_frequency(&py_qpc_base, raise_exc) < 0) {
++                    return -1;
++                }
++            }
++
++            info->implementation = "GetSystemTimePreciseAsFileTime()";
++            info->resolution = _PyTimeFraction_Resolution(&py_qpc_base);
++        } else {
++            DWORD timeAdjustment, timeIncrement;
++            BOOL isTimeAdjustmentDisabled, ok;
++
++            info->implementation = "GetSystemTimeAsFileTime()";
++            ok = GetSystemTimeAdjustment(&timeAdjustment, &timeIncrement,
++                                         &isTimeAdjustmentDisabled);
++            if (!ok) {
++                PyErr_SetFromWindowsErr(0);
+                 return -1;
+             }
++            info->resolution = timeIncrement * 1e-7;
+         }
+ 
+-        info->implementation = "GetSystemTimePreciseAsFileTime()";
+         info->monotonic = 0;
+-        info->resolution = _PyTimeFraction_Resolution(&py_qpc_base);
+         info->adjustable = 1;
+     }
+ 
+diff --git a/Tools/msi/appendpath/appendpath.wxs b/Tools/msi/appendpath/appendpath.wxs
+--- a/Tools/msi/appendpath/appendpath.wxs
++++ b/Tools/msi/appendpath/appendpath.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         
+         <PropertyRef Id="DetectTargetDir" />
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/bundle/Default.wxl b/Tools/msi/bundle/Default.wxl
+--- a/Tools/msi/bundle/Default.wxl
++++ b/Tools/msi/bundle/Default.wxl
+@@ -123,9 +123,26 @@ Feel free to post at &lt;a href="https://discuss.python.org/c/users/7"&gt;discus
+   <String Id="FailureRestartText">You must restart your computer to complete the rollback of the software.</String>
+   <String Id="FailureRestartButton">&amp;Restart</String>
+   <String Id="FailureExistingInstall">Unable to install [WixBundleName] due to an existing install. Use Programs and Features to modify, repair or remove [WixBundleName].</String>
+-  <String Id="FailureOldOS">At least Windows 8.1 or Windows Server 2012 are required to install [WixBundleName]
++  <String Id="FailureWin7MissingSP1">Windows 7 Service Pack 1 and all applicable updates are required to install [WixBundleName].
++
++Please &lt;a href="https://www.bing.com/search?q=how%20to%20install%20windows%207%20service%20pack%201"&gt;update your machine&lt;/a&gt; and then restart the installation.</String>
++  <String Id="FailureVistaMissingSP2">Windows Vista Service Pack 2 and all applicable updates are required to install [WixBundleName].
++
++Please &lt;a href="https://www.bing.com/search?q=how%20to%20install%20windows%20vista%20service%20pack%202"&gt;update your machine&lt;/a&gt; and then restart the installation.</String>
++  <String Id="FailureXPOrEarlier">Windows Vista or later is required to install and use [WixBundleName].
++
++Visit &lt;a href="https://www.python.org/"&gt;python.org&lt;/a&gt; to download Python 3.4.</String>
++
++  <String Id="FailureWS2K8R2MissingSP1">Windows Server 2008 R2 Service Pack 1 and all applicable updates are required to install [WixBundleName].
++
++Please &lt;a href="https://www.bing.com/search?q=how%20to%20install%20windows%20server%202008%20r2%20service%20pack%201"&gt;update your machine&lt;/a&gt; and then restart the installation.</String>
++  <String Id="FailureWS2K8MissingSP2">Windows Server 2008 Service Pack 2 and all applicable updates are required to install [WixBundleName].
++
++Please &lt;a href="https://www.bing.com/search?q=how%20to%20install%20windows%20server%202008%20service%20pack%202"&gt;update your machine&lt;/a&gt; and then restart the installation.</String>
++  <String Id="FailureWS2K3OrEarlier">Windows Server 2008 SP2 or later is required to install and use [WixBundleName].
++
++Visit &lt;a href="https://www.python.org/"&gt;python.org&lt;/a&gt; to download Python 3.4.</String>
+ 
+-Visit &lt;a href="https://www.python.org/downloads/"&gt;python.org&lt;/a&gt; to download an earlier version of Python.</String>
+   <String Id="SuccessMaxPathButton">Disable path length limit</String>
+   <String Id="SuccessMaxPathButtonNote">Changes your machine configuration to allow programs, including Python, to bypass the 260 character "MAX_PATH" limitation.</String>
+ </WixLocalization>
+diff --git a/Tools/msi/bundle/bootstrap/PythonBootstrapperApplication.cpp b/Tools/msi/bundle/bootstrap/PythonBootstrapperApplication.cpp
+--- a/Tools/msi/bundle/bootstrap/PythonBootstrapperApplication.cpp
++++ b/Tools/msi/bundle/bootstrap/PythonBootstrapperApplication.cpp
+@@ -3090,35 +3090,81 @@ private:
+                 BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Target OS is Windows Server 2012 or later");
+                 return;
+             } else if (IsWindowsVersionOrGreater(6, 1, 1)) {
+-                BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Detected Windows Server 2008 R2");
++                HMODULE hKernel32 = GetModuleHandleW(L"kernel32");
++                if (hKernel32 && !GetProcAddress(hKernel32, "AddDllDirectory")) {
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows Server 2008 R2 without KB2533623");
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "KB2533623 update is required to continue.");
++                    /* The "MissingSP1" error also specifies updates are required */
++                    LocGetString(_wixLoc, L"#(loc.FailureWS2K8R2MissingSP1)", &pLocString);
++                } else {
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Target OS is Windows Server 2008 R2 or later");
++                    return;
++                }
+             } else if (IsWindowsVersionOrGreater(6, 1, 0)) {
+                 BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows Server 2008 R2");
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Service Pack 1 is required to continue installation");
++                LocGetString(_wixLoc, L"#(loc.FailureWS2K8R2MissingSP1)", &pLocString);
++            } else if (IsWindowsVersionOrGreater(6, 0, 2)) {
++                HMODULE hKernel32 = GetModuleHandleW(L"kernel32");
++                if (hKernel32 && !GetProcAddress(hKernel32, "AddDllDirectory")) {
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows Server 2008 SP2 without KB2533623");
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "KB2533623 update is required to continue.");
++                    /* The "MissingSP2" error also specifies updates are required */
++                    LocGetString(_wixLoc, L"#(loc.FailureWS2K8MissingSP2)", &pLocString);
++                } else {
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Target OS is Windows Server 2008 SP2 or later");
++                    return;
++                }
+             } else if (IsWindowsVersionOrGreater(6, 0, 0)) {
+                 BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows Server 2008");
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Service Pack 2 is required to continue installation");
++                LocGetString(_wixLoc, L"#(loc.FailureWS2K8MissingSP2)", &pLocString);
+             } else {
+                 BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows Server 2003 or earlier");
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Windows Server 2008 SP2 or later is required to continue installation");
++                LocGetString(_wixLoc, L"#(loc.FailureWS2K3OrEarlier)", &pLocString);
+             }
+-            BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Windows Server 2012 or later is required to continue installation");
+         } else {
+-            if (IsWindows10OrGreater()) {
+-                BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Target OS is Windows 10 or later");
+-                return;
+-            } else if (IsWindows8Point1OrGreater()) {
+-                BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Target OS is Windows 8.1");
++            if (IsWindows8OrGreater()) {
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Target OS is Windows 8 or later");
+                 return;
+-            } else if (IsWindows8OrGreater()) {
+-                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows 8");
++            } else if (IsWindows7SP1OrGreater()) {
++                HMODULE hKernel32 = GetModuleHandleW(L"kernel32");
++                if (hKernel32 && !GetProcAddress(hKernel32, "AddDllDirectory")) {
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows 7 SP1 without KB2533623");
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "KB2533623 update is required to continue.");
++                    /* The "MissingSP1" error also specifies updates are required */
++                    LocGetString(_wixLoc, L"#(loc.FailureWin7MissingSP1)", &pLocString);
++                } else {
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Target OS is Windows 7 SP1 or later");
++                    return;
++                }
+             } else if (IsWindows7OrGreater()) {
+-                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows 7");
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows 7 RTM");
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Service Pack 1 is required to continue installation");
++                LocGetString(_wixLoc, L"#(loc.FailureWin7MissingSP1)", &pLocString);
++            } else if (IsWindowsVistaSP2OrGreater()) {
++                HMODULE hKernel32 = GetModuleHandleW(L"kernel32");
++                if (hKernel32 && !GetProcAddress(hKernel32, "AddDllDirectory")) {
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows Vista SP2 without KB2533623");
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "KB2533623 update is required to continue.");
++                    /* The "MissingSP2" error also specifies updates are required */
++                    LocGetString(_wixLoc, L"#(loc.FailureVistaMissingSP2)", &pLocString);
++                } else {
++                    BalLog(BOOTSTRAPPER_LOG_LEVEL_STANDARD, "Target OS is Windows Vista SP2 or later");
++                    return;
++                }
+             } else if (IsWindowsVistaOrGreater()) {
+-                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows Vista");
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows Vista RTM or SP1");
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Service Pack 2 is required to continue installation");
++                LocGetString(_wixLoc, L"#(loc.FailureVistaMissingSP2)", &pLocString);
+             } else { 
+                 BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Detected Windows XP or earlier");
++                BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Windows Vista SP2 or later is required to continue installation");
++                LocGetString(_wixLoc, L"#(loc.FailureXPOrEarlier)", &pLocString);
+             }
+-            BalLog(BOOTSTRAPPER_LOG_LEVEL_ERROR, "Windows 8.1 or later is required to continue installation");
+         }
+ 
+-        LocGetString(_wixLoc, L"#(loc.FailureOldOS)", &pLocString);
+         if (pLocString && pLocString->wzText) {
+             BalFormatString(pLocString->wzText, &_failedMessage);
+         }
+diff --git a/Tools/msi/core/core.wxs b/Tools/msi/core/core.wxs
+--- a/Tools/msi/core/core.wxs
++++ b/Tools/msi/core/core.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/core/core_d.wxs b/Tools/msi/core/core_d.wxs
+--- a/Tools/msi/core/core_d.wxs
++++ b/Tools/msi/core/core_d.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title_d)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/core/core_pdb.wxs b/Tools/msi/core/core_pdb.wxs
+--- a/Tools/msi/core/core_pdb.wxs
++++ b/Tools/msi/core/core_pdb.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.TitlePdb)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/dev/dev.wxs b/Tools/msi/dev/dev.wxs
+--- a/Tools/msi/dev/dev.wxs
++++ b/Tools/msi/dev/dev.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="DetectTargetDir" />
+diff --git a/Tools/msi/dev/dev_d.wxs b/Tools/msi/dev/dev_d.wxs
+--- a/Tools/msi/dev/dev_d.wxs
++++ b/Tools/msi/dev/dev_d.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title_d)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/doc/doc.wxs b/Tools/msi/doc/doc.wxs
+--- a/Tools/msi/doc/doc.wxs
++++ b/Tools/msi/doc/doc.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="DetectTargetDir" />
+diff --git a/Tools/msi/exe/exe.wxs b/Tools/msi/exe/exe.wxs
+--- a/Tools/msi/exe/exe.wxs
++++ b/Tools/msi/exe/exe.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+ 
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/exe/exe_d.wxs b/Tools/msi/exe/exe_d.wxs
+--- a/Tools/msi/exe/exe_d.wxs
++++ b/Tools/msi/exe/exe_d.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title_d)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/exe/exe_pdb.wxs b/Tools/msi/exe/exe_pdb.wxs
+--- a/Tools/msi/exe/exe_pdb.wxs
++++ b/Tools/msi/exe/exe_pdb.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.TitlePdb)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/freethreaded/freethreaded.wxs b/Tools/msi/freethreaded/freethreaded.wxs
+--- a/Tools/msi/freethreaded/freethreaded.wxs
++++ b/Tools/msi/freethreaded/freethreaded.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+ 
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/freethreaded/freethreaded_d.wxs b/Tools/msi/freethreaded/freethreaded_d.wxs
+--- a/Tools/msi/freethreaded/freethreaded_d.wxs
++++ b/Tools/msi/freethreaded/freethreaded_d.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title_d)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/freethreaded/freethreaded_pdb.wxs b/Tools/msi/freethreaded/freethreaded_pdb.wxs
+--- a/Tools/msi/freethreaded/freethreaded_pdb.wxs
++++ b/Tools/msi/freethreaded/freethreaded_pdb.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.TitlePdb)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/launcher/launcher.wxs b/Tools/msi/launcher/launcher.wxs
+--- a/Tools/msi/launcher/launcher.wxs
++++ b/Tools/msi/launcher/launcher.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+ 
+         <Property Id="Suppress_TARGETDIR_Check" Value="1" />
+diff --git a/Tools/msi/lib/lib.wxs b/Tools/msi/lib/lib.wxs
+--- a/Tools/msi/lib/lib.wxs
++++ b/Tools/msi/lib/lib.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="DetectTargetDir" />
+diff --git a/Tools/msi/lib/lib_d.wxs b/Tools/msi/lib/lib_d.wxs
+--- a/Tools/msi/lib/lib_d.wxs
++++ b/Tools/msi/lib/lib_d.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title_d)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/lib/lib_pdb.wxs b/Tools/msi/lib/lib_pdb.wxs
+--- a/Tools/msi/lib/lib_pdb.wxs
++++ b/Tools/msi/lib/lib_pdb.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.TitlePdb)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/path/path.wxs b/Tools/msi/path/path.wxs
+--- a/Tools/msi/path/path.wxs
++++ b/Tools/msi/path/path.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+ 
+         <PropertyRef Id="DetectTargetDir" />
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/pip/pip.wxs b/Tools/msi/pip/pip.wxs
+--- a/Tools/msi/pip/pip.wxs
++++ b/Tools/msi/pip/pip.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         
+         <PropertyRef Id="UpgradeTable" />
+         <PropertyRef Id="REGISTRYKEY" />
+diff --git a/Tools/msi/tcltk/tcltk.wxs b/Tools/msi/tcltk/tcltk.wxs
+--- a/Tools/msi/tcltk/tcltk.wxs
++++ b/Tools/msi/tcltk/tcltk.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="DetectTargetDir" />
+diff --git a/Tools/msi/tcltk/tcltk_d.wxs b/Tools/msi/tcltk/tcltk_d.wxs
+--- a/Tools/msi/tcltk/tcltk_d.wxs
++++ b/Tools/msi/tcltk/tcltk_d.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title_d)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/tcltk/tcltk_pdb.wxs b/Tools/msi/tcltk/tcltk_pdb.wxs
+--- a/Tools/msi/tcltk/tcltk_pdb.wxs
++++ b/Tools/msi/tcltk/tcltk_pdb.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.TitlePdb)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/test/test.wxs b/Tools/msi/test/test.wxs
+--- a/Tools/msi/test/test.wxs
++++ b/Tools/msi/test/test.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="DetectTargetDir" />
+diff --git a/Tools/msi/test/test_d.wxs b/Tools/msi/test/test_d.wxs
+--- a/Tools/msi/test/test_d.wxs
++++ b/Tools/msi/test/test_d.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title_d)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/test/test_pdb.wxs b/Tools/msi/test/test_pdb.wxs
+--- a/Tools/msi/test/test_pdb.wxs
++++ b/Tools/msi/test/test_pdb.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.TitlePdb)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="UpgradeTable" />
+diff --git a/Tools/msi/ucrt/ucrt.wxs b/Tools/msi/ucrt/ucrt.wxs
+--- a/Tools/msi/ucrt/ucrt.wxs
++++ b/Tools/msi/ucrt/ucrt.wxs
+@@ -1,7 +1,7 @@
+ ﻿<?xml version="1.0" encoding="UTF-8"?>
+ <Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+     <Product Id="*" Language="!(loc.LCID)" Name="!(loc.Title)" Version="$(var.Version)" Manufacturer="!(loc.Manufacturer)" UpgradeCode="$(var.UpgradeCode)">
+-        <Package InstallerVersion="500" Compressed="yes" InstallScope="perUser" />
++        <Package InstallerVersion="300" Compressed="yes" InstallScope="perUser" />
+         <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
+         
+         <PropertyRef Id="DetectTargetDir" />
