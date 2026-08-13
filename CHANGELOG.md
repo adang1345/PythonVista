@@ -1,3 +1,7 @@
+## 13 August 2026
+
+- Add 3.10.21, 3.11.16, and 3.12.14.
+
 ## 11 August 2026
 
 - Move all release artifacts to GitHub Releases in preparation for Python 3.15, which will contain a file whose size exceeds 100MB. GitHub enforces a 100MB file size limit for items within the repository, while artifacts published via GitHub Releases have a higher size limit.
