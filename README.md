@@ -2,6 +2,18 @@
 
 Officially, Python 3.8 and above are not supported on Windows Vista SP2 and Windows Server 2008 SP2. Here, you can obtain unofficial Windows installers that bring back support for these older Windows versions.
 
+### Links to Latest Versions
+
+[3.14.7](https://github.com/adang1345/PythonVista/releases/tag/v3.14.7) &nbsp;
+[3.13.15](https://github.com/adang1345/PythonVista/releases/tag/v3.13.15) &nbsp;
+[3.12.14](https://github.com/adang1345/PythonVista/releases/tag/v3.12.14) &nbsp;
+[3.11.16](https://github.com/adang1345/PythonVista/releases/tag/v3.11.16) &nbsp;
+[3.10.21](https://github.com/adang1345/PythonVista/releases/tag/v3.10.21) &nbsp;
+[3.9.25](https://github.com/adang1345/PythonVista/releases/tag/v3.9.25) &nbsp;
+[3.8.20](https://github.com/adang1345/PythonVista/releases/tag/v3.8.20)
+
+---
+
 These installers also work on newer versions of Windows and can be used whenever official support is dropped. Supported Windows versions include the following.
 - Windows Vista SP2
 - Windows Server 2008 SP2
