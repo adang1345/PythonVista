@@ -1,0 +1,45 @@
+diff --git a/PCbuild/get_externals.bat b/PCbuild/get_externals.bat
+--- a/PCbuild/get_externals.bat
++++ b/PCbuild/get_externals.bat
+@@ -80,7 +80,6 @@ echo.Fetching external binaries...
+ set binaries=
+ if NOT "%IncludeLibffi%"=="false"  set binaries=%binaries% libffi-3.4.4
+ if NOT "%IncludeSSL%"=="false"     set binaries=%binaries% openssl-bin-3.5.7
+-if NOT "%IncludeTkinter%"=="false" set binaries=%binaries% tcltk-9.0.4.0
+ if NOT "%IncludeSSLSrc%"=="false"  set binaries=%binaries% nasm-2.11.06
+ if NOT "%IncludeLLVM%"=="false"    set binaries=%binaries% llvm-21.1.4.0
+ 
+@@ -100,6 +99,21 @@ for %%b in (%binaries%) do (
+     )
+ )
+ 
++set binaries=
++if NOT "%IncludeTkinter%"=="false" set binaries=%binaries% tcltk-9.0.4.1
++
++for %%b in (%binaries%) do (
++    if exist "%EXTERNALS_DIR%\%%b" (
++        echo.%%b already exists, skipping.
++    ) else if NOT DEFINED PYTHON (
++        echo.Fetching %%b with git...
++        git clone --depth 1 https://github.com/adang1345/cpython-bin-deps --branch %%b "%EXTERNALS_DIR%\%%b"
++    ) else (
++        echo.Fetching %%b...
++        %PYTHON% -E "%PCBUILD%\get_external.py" -b -O adang1345 -e "%EXTERNALS_DIR%" %%b
++    )
++)
++
+ if exist "%EXTERNALS_DIR%\api-ms-win-core-path" (
+     echo.api-ms-win-core-path already exists, skipping.
+ ) else if NOT DEFINED PYTHON (
+diff --git a/PCbuild/tcltk.props b/PCbuild/tcltk.props
+--- a/PCbuild/tcltk.props
++++ b/PCbuild/tcltk.props
+@@ -2,7 +2,7 @@
+ <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+   <Import Project="pyproject.props" Condition="$(__PyProject_Props_Imported) != 'true'" />
+   <PropertyGroup>
+-    <TclVersion Condition="$(TclVersion) == ''">9.0.4.0</TclVersion>
++    <TclVersion Condition="$(TclVersion) == ''">9.0.4.1</TclVersion>
+     <TkVersion Condition="$(TkVersion) == ''">$(TclVersion)</TkVersion>
+     <TclMajorVersion>$([System.Version]::Parse($(TclVersion)).Major)</TclMajorVersion>
+     <TclMinorVersion>$([System.Version]::Parse($(TclVersion)).Minor)</TclMinorVersion>
