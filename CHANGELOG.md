@@ -1,3 +1,7 @@
+## 1 September 2026
+
+- Replace 3.15.0rc1 with 3.15.0rc2.
+
 ## 16 August 2026
 
 - Rebuild 3.14.7 and 3.15.0rc1 to fix an incompatibility where the Tcl/Tk dependency crashes on Windows Vista.
