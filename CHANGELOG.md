@@ -1,3 +1,7 @@
+## 9 October 2026
+
+- Replace 3.15.0rc3 with 3.15.0.
+
 ## 3 October 2026
 
 - Replace 3.15.0rc2 with 3.15.0rc3.
