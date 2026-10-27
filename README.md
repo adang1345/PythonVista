@@ -4,11 +4,11 @@ Officially, Python 3.8 and above are not supported on Windows Vista SP2 and Wind
 
 ### Links to Latest Versions
 
-[3.15.1](https://github.com/adang1345/PythonVista/releases/tag/v3.15.1) &nbsp;
-[3.14.9](https://github.com/adang1345/PythonVista/releases/tag/v3.14.9) &nbsp;
-[3.13.17](https://github.com/adang1345/PythonVista/releases/tag/v3.13.17) &nbsp;
-[3.12.15](https://github.com/adang1345/PythonVista/releases/tag/v3.12.15) &nbsp;
-[3.11.17](https://github.com/adang1345/PythonVista/releases/tag/v3.11.17) &nbsp;
+[3.15.2](https://github.com/adang1345/PythonVista/releases/tag/v3.15.2) &nbsp;
+[3.14.10](https://github.com/adang1345/PythonVista/releases/tag/v3.14.10) &nbsp;
+[3.13.18](https://github.com/adang1345/PythonVista/releases/tag/v3.13.18) &nbsp;
+[3.12.16](https://github.com/adang1345/PythonVista/releases/tag/v3.12.16) &nbsp;
+[3.11.18](https://github.com/adang1345/PythonVista/releases/tag/v3.11.18) &nbsp;
 [3.10.22](https://github.com/adang1345/PythonVista/releases/tag/v3.10.22) &nbsp;
 [3.9.25](https://github.com/adang1345/PythonVista/releases/tag/v3.9.25) &nbsp;
 [3.8.20](https://github.com/adang1345/PythonVista/releases/tag/v3.8.20)

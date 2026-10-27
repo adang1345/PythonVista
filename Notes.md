@@ -47,8 +47,8 @@
 
 ## Python 3.11
 
-- For 3.11.0-3.11.7, create a Python 3.9 venv. For 3.11.8 or higher, create a Python 3.10 venv. Set `PYTHON` to the location of the Python executable.
-- Apply `support-vs-2026-11.patch` to support building with Visual Studio 2026 using the v145 toolset (derived from https://github.com/python/cpython/commit/c06f4f43015528db45bd6b44b46c057d88b38583).
+- For 3.11.0-3.11.7, create a Python 3.9 venv. For 3.11.8 or higher, create a Python 3.10 venv. Set `PYTHON` to the location of the Python executable. If building multiple versions in succession, create a fresh new venv with 3.11.12.
+- Apply `support-vs-2026-11.patch` for 3.11.0-3.11.17 or `support-vs-2026-12.patch` for 3.11.18 or higher to support building with Visual Studio 2026 using the v145 toolset (derived from https://github.com/python/cpython/commit/c06f4f43015528db45bd6b44b46c057d88b38583).
 - Apply `fix-sphinx-dependencies.patch` for 3.11.0-3.11.7 to fix an error when building the documentation due to incompatible Sphinx dependencies (https://github.com/sphinx-doc/sphinx/issues/11890).
 - Apply `add-dll-2.patch` for 3.11.0, `add-dll-5.patch` for 3.11.1, `add-dll-6.patch` for 3.11.2-3.11.7, or `add-dll-4.patch` for 3.11.8 or higher to ensure that `api-ms-win-core-path-l1-1-0.dll` is installed next to the Python executable.
 - Apply `restore-vista-handling-3.patch` for 3.11.0-3.11.3 or `restore-vista-handling-4.patch` for 3.11.4 or higher to revert or modify changes to the Python source code that are not compatible with Windows Vista. This modifies https://github.com/python/cpython/commit/37a06cbe5c17c2aa6ad938339fd42531a8a0bea0, https://github.com/python/cpython/commit/aa929273caca2f4e24e3aa9e790272fd4458ad35, https://github.com/python/cpython/commit/55868f1a335cd3853938082a5b25cfba66563135, and https://github.com/python/cpython/commit/45faf151c693b6f13f78926761caea6df7242024.
