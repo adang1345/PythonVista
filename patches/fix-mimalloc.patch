@@ -1,0 +1,247 @@
+diff --git a/Include/internal/mimalloc/mimalloc/atomic.h b/Include/internal/mimalloc/mimalloc/atomic.h
+--- a/Include/internal/mimalloc/mimalloc/atomic.h
++++ b/Include/internal/mimalloc/mimalloc/atomic.h
+@@ -522,26 +522,17 @@ static inline void mi_atomic_yield_sleep( size_t* ticks, const size_t ticks_unti
+ #if defined(_WIN32)
+ 
+ typedef struct mi_lock_s {
+-  SRWLOCK mutex;    // slim reader-writer lock
++  union {
++    SRWLOCK srw;  // slim reader-writer lock
++    CRITICAL_SECTION cs;
++  };
+ } mi_lock_t;
+ 
+-#define MI_LOCK_INITIALIZER   { SRWLOCK_INIT }
+-
+-static inline bool mi_lock_try_acquire(mi_lock_t* lock) {
+-  return TryAcquireSRWLockExclusive(&lock->mutex);
+-}
+-static inline void mi_lock_acquire(mi_lock_t* lock) {
+-  AcquireSRWLockExclusive(&lock->mutex);
+-}
+-static inline void mi_lock_release(mi_lock_t* lock) {
+-  ReleaseSRWLockExclusive(&lock->mutex);
+-}
+-static inline void mi_lock_init(mi_lock_t* lock) {
+-  InitializeSRWLock(&lock->mutex);
+-}
+-static inline void mi_lock_done(mi_lock_t* lock) {
+-  (void)(lock);
+-}
++extern bool (*mi_lock_try_acquire)(mi_lock_t* lock);
++extern void (*mi_lock_acquire)(mi_lock_t* lock);
++extern void (*mi_lock_release)(mi_lock_t* lock);
++extern void (*mi_lock_init)(mi_lock_t* lock);
++extern void (*mi_lock_done)(mi_lock_t* lock);
+ 
+ #elif defined(MI_USE_PTHREADS)
+ 
+@@ -647,7 +638,14 @@ static inline void mi_lock_done(mi_lock_t* lock) {
+ 
+ typedef struct mi_atomic_once_s {
+   _Atomic(uintptr_t) tid;
++#ifdef _WIN32
++  // need to use SRWLOCK because CRITICAL_SECTION does not support static
++  // initialization, and TryAcquireSRWLockExclusive() is not needed for
++  // one-time initialization
++  SRWLOCK            lock;
++#else
+   mi_lock_t          lock;
++#endif
+ } mi_atomic_once_t;
+ 
+ // Returns `true` only on the first invocation, signifying we can execute an action once.
+@@ -656,9 +654,14 @@ typedef struct mi_atomic_once_s {
+ bool _mi_atomic_once_enter(mi_atomic_once_t* once);        // defined in `libc.c`
+ void _mi_atomic_once_release(mi_atomic_once_t* once);      // defined in `libc.c`
+ 
++#ifdef _WIN32
++#define mi_atomic_do_once  \
++  static mi_atomic_once_t _mi_once = { MI_ATOMIC_VAR_INIT(0), SRWLOCK_INIT }; \
++  for(bool _mi_exec = _mi_atomic_once_enter(&_mi_once); _mi_exec; (_mi_atomic_once_release(&_mi_once),_mi_exec=false))
++#else
+ #define mi_atomic_do_once  \
+   static mi_atomic_once_t _mi_once = { MI_ATOMIC_VAR_INIT(0), MI_LOCK_INITIALIZER }; \
+   for(bool _mi_exec = _mi_atomic_once_enter(&_mi_once); _mi_exec; (_mi_atomic_once_release(&_mi_once),_mi_exec=false))
+-
++#endif
+ 
+ #endif // __MIMALLOC_ATOMIC_H
+diff --git a/Include/internal/mimalloc/mimalloc/internal.h b/Include/internal/mimalloc/mimalloc/internal.h
+--- a/Include/internal/mimalloc/mimalloc/internal.h
++++ b/Include/internal/mimalloc/mimalloc/internal.h
+@@ -123,6 +123,9 @@ bool        _mi_streq(const char* s, const char* t);
+ int         _mi_getenv(const char* name, char* result, size_t result_size);
+ 
+ // "options.c"
++#ifdef _WIN32
++void        _mi_options_lock_init(void);
++#endif
+ void        _mi_fputs(mi_output_fun* out, void* arg, const char* prefix, const char* message);
+ void        _mi_fprintf(mi_output_fun* out, void* arg, const char* fmt, ...);
+ void        _mi_message(const char* fmt, ...);
+diff --git a/Include/internal/mimalloc/mimalloc/prim.h b/Include/internal/mimalloc/mimalloc/prim.h
+--- a/Include/internal/mimalloc/mimalloc/prim.h
++++ b/Include/internal/mimalloc/mimalloc/prim.h
+@@ -124,6 +124,9 @@ void _mi_prim_thread_done_auto_done(void);
+ // Called when the default heap for a thread changes
+ void _mi_prim_thread_associate_default_heap(mi_heap_t* heap);
+ 
++#ifdef _WIN32
++void _mi_prim_lock_init(void);
++#endif
+ 
+ //-------------------------------------------------------------------
+ // Access to TLS (thread local storage) slots.
+diff --git a/Objects/mimalloc/init.c b/Objects/mimalloc/init.c
+--- a/Objects/mimalloc/init.c
++++ b/Objects/mimalloc/init.c
+@@ -210,6 +210,9 @@ void _mi_heap_guarded_init(mi_heap_t* heap) {
+ 
+ static void mi_heap_main_init(void) {
+   if (_mi_heap_main.cookie == 0) {
++#ifdef _WIN32
++    _mi_prim_lock_init();  // call as early as possible before the first usage of locks
++#endif
+     _mi_heap_main.thread_id = _mi_thread_id();
+     _mi_heap_main.cookie = 1;
+     #if defined(_WIN32) && !defined(MI_SHARED_LIB)
+diff --git a/Objects/mimalloc/libc.c b/Objects/mimalloc/libc.c
+--- a/Objects/mimalloc/libc.c
++++ b/Objects/mimalloc/libc.c
+@@ -107,13 +107,21 @@ bool _mi_atomic_once_enter(mi_atomic_once_t* once) {
+     return false; // recursive invocation; we need this for process_init for example
+   }
+ 
++#ifdef _WIN32
++  AcquireSRWLockExclusive(&once->lock);
++#else
+   mi_lock_acquire(&once->lock);
++#endif
+   uintptr_t expected = 0;
+   if (mi_atomic_cas_strong_acq_rel(&once->tid, &expected, current_tid)) {  // could use atomic_load/store as well
+     return true;  // should execute and release
+   }
+   else {
++#ifdef _WIN32
++    ReleaseSRWLockExclusive(&once->lock);
++#else
+     mi_lock_release(&once->lock);
++#endif
+     return false; // already another thread entered and released
+   }
+ }
+@@ -121,7 +129,11 @@ bool _mi_atomic_once_enter(mi_atomic_once_t* once) {
+ void _mi_atomic_once_release(mi_atomic_once_t* once) {
+   if (mi_atomic_load_acquire(&once->tid)>1) {  // paranoia
+     mi_atomic_store_release(&once->tid,1);     // done executing
++#ifdef _WIN32
++    ReleaseSRWLockExclusive(&once->lock);
++#else
+     mi_lock_release(&once->lock);
++#endif
+   }
+ }
+ 
+diff --git a/Objects/mimalloc/options.c b/Objects/mimalloc/options.c
+--- a/Objects/mimalloc/options.c
++++ b/Objects/mimalloc/options.c
+@@ -338,7 +338,15 @@ static void mi_cdecl mi_out_stderr(const char* msg, void* arg) {
+ #endif
+ static char out_buf[MI_MAX_DELAY_OUTPUT+1];
+ static _Atomic(size_t) out_len;
++#ifdef _WIN32
++static mi_lock_t out_buf_lock;
++
++void _mi_options_lock_init(void) {
++  mi_lock_init(&out_buf_lock);
++}
++#else
+ static mi_lock_t out_buf_lock = MI_LOCK_INITIALIZER;
++#endif
+ 
+ static void mi_cdecl mi_out_buf(const char* msg, void* arg) {
+   MI_UNUSED(arg);
+diff --git a/Objects/mimalloc/prim/windows/prim.c b/Objects/mimalloc/prim/windows/prim.c
+--- a/Objects/mimalloc/prim/windows/prim.c
++++ b/Objects/mimalloc/prim/windows/prim.c
+@@ -8,11 +8,78 @@ terms of the MIT license. A copy of the license can be found in the file
+ // This file is included in `src/prim/prim.c`
+ 
+ #include "mimalloc.h"
++#include "mimalloc/atomic.h"
+ #include "mimalloc/internal.h"
+ #include "mimalloc/prim.h"
+ #include <stdio.h>   // fputs, stderr
+ #include <stdlib.h>  // atexit
+ 
++bool (*mi_lock_try_acquire)(mi_lock_t* lock);
++void (*mi_lock_acquire)(mi_lock_t* lock);
++void (*mi_lock_release)(mi_lock_t* lock);
++void (*mi_lock_init)(mi_lock_t* lock);
++void (*mi_lock_done)(mi_lock_t* lock);
++
++// implementation of lock using SRWLOCK
++typedef BOOLEAN (WINAPI *TryAcquireSRWLockExclusive_func)(PSRWLOCK SRWLock);
++static TryAcquireSRWLockExclusive_func mi_TryAcquireSRWLockExclusive;
++static bool mi_lock_try_acquire_srw(mi_lock_t* lock) {
++  return mi_TryAcquireSRWLockExclusive(&lock->srw);
++}
++static void mi_lock_acquire_srw(mi_lock_t* lock) {
++  AcquireSRWLockExclusive(&lock->srw);
++}
++static void mi_lock_release_srw(mi_lock_t* lock) {
++  ReleaseSRWLockExclusive(&lock->srw);
++}
++static void mi_lock_init_srw(mi_lock_t* lock) {
++  InitializeSRWLock(&lock->srw);
++}
++static void mi_lock_done_srw(mi_lock_t* lock) {
++  (void)(lock);
++}
++
++// implementation of lock using CRITICAL_SECTION
++static bool mi_lock_try_acquire_cs(mi_lock_t* lock) {
++  return TryEnterCriticalSection(&lock->cs);
++}
++static void mi_lock_acquire_cs(mi_lock_t* lock) {
++  EnterCriticalSection(&lock->cs);
++}
++static void mi_lock_release_cs(mi_lock_t* lock) {
++  LeaveCriticalSection(&lock->cs);
++}
++static void mi_lock_init_cs(mi_lock_t* lock) {
++  InitializeCriticalSection(&lock->cs);
++}
++static void mi_lock_done_cs(mi_lock_t* lock) {
++  DeleteCriticalSection(&lock->cs);
++}
++
++// Initialize the lock implementation. Use SRWLOCK on Windows 7+. Use
++// CRITICAL_SECTION on Windows Vista.
++void _mi_prim_lock_init(void) {
++  HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
++  const char* kind;
++  if (kernel32 && (mi_TryAcquireSRWLockExclusive = (TryAcquireSRWLockExclusive_func)GetProcAddress(kernel32, "TryAcquireSRWLockExclusive")) != NULL) {
++    mi_lock_try_acquire = mi_lock_try_acquire_srw;
++    mi_lock_acquire = mi_lock_acquire_srw;
++    mi_lock_release = mi_lock_release_srw;
++    mi_lock_init = mi_lock_init_srw;
++    mi_lock_done = mi_lock_done_srw;
++    kind = "SRWLOCK";
++  } else {
++    mi_lock_try_acquire = mi_lock_try_acquire_cs;
++    mi_lock_acquire = mi_lock_acquire_cs;
++    mi_lock_release = mi_lock_release_cs;
++    mi_lock_init = mi_lock_init_cs;
++    mi_lock_done = mi_lock_done_cs;
++    kind = "CRITICAL_SECTION";
++  }
++  _mi_options_lock_init();  // must call before any message output, which uses out_buf_lock
++  _mi_verbose_message("_mi_prim_lock_init: %s\n", kind);
++}
++
+ // xbox has no console IO and cannot use LoadLibrary or GetModuleHandle
+ #if !defined(WINAPI_FAMILY_PARTITION) || WINAPI_FAMILY_PARTITION(WINAPI_PARTITION_DESKTOP | WINAPI_PARTITION_SYSTEM)
+ #define MI_WIN_DESKTOP  1

@@ -93,6 +93,7 @@
 - Apply `build-full-installer-8.patch` to include debug symbols, debug binaries, the Universal CRT, and the free-threaded build in the installer. Also include the JIT compiler, which is present in official releases.
 - Apply `fix-launcher-2.patch` to ensure that `api-ms-win-core-path-l1-1-0.dll` is installed next to the Python launcher, to work around the lack of support for `SORT_DIGITSASNUMBERS` with `CompareStringEx()`, and to work around bugs in `GetPrivateProfileStringW()` and [`RegGetValueW()`](https://stackoverflow.com/questions/47096940/reggetvalue-for-value-that-may-be-either-reg-sz-or-reg-expand-sz).
 - Apply `fix-tcltk-1.patch` for 3.14.7 or `fix-tcltk-2.patch` for 3.14.8 or higher to use a patched version of the Tcl/Tk dependency that supports Windows Vista. (See https://github.com/python/cpython/issues/124111, https://core.tcl-lang.org/tips/doc/trunk/tip/592.md, and https://core.tcl-lang.org/tips/doc/main/tip/610.md.)
+- Apply `fix-mimalloc.patch` for 3.14.10 or higher to restore Windows Vista compatibility with the `mimalloc` dependency. (See https://github.com/python/cpython/commit/aff7a2e23bd6ed68fa15c1ceda94a2fdd7f8cf7f and https://github.com/microsoft/mimalloc/commit/93e14344c7be10f186a39f7bee998db8adcead9b.)
 - Run `buildrelease.bat`.
 
 ## Python 3.15
@@ -103,4 +104,5 @@
 - Apply `build-full-installer-9.patch` to include debug symbols, debug binaries, the Universal CRT, and the free-threaded build in the installer. Also include the JIT compiler and the x64 tail-calling interpreter, which are present in official releases.
 - Apply `fix-launcher-2.patch` to ensure that `api-ms-win-core-path-l1-1-0.dll` is installed next to the Python launcher, to work around the lack of support for `SORT_DIGITSASNUMBERS` with `CompareStringEx()`, and to work around bugs in `GetPrivateProfileStringW()` and [`RegGetValueW()`](https://stackoverflow.com/questions/47096940/reggetvalue-for-value-that-may-be-either-reg-sz-or-reg-expand-sz).
 - Apply `fix-tcltk-3.patch` to use a patched version of the Tcl/Tk dependency that supports Windows Vista. (See https://github.com/python/cpython/issues/124111, https://core.tcl-lang.org/tips/doc/trunk/tip/592.md, and https://core.tcl-lang.org/tips/doc/main/tip/610.md.)
+- Apply `fix-mimalloc.patch` for 3.15.2 or higher to restore Windows Vista compatibility with the `mimalloc` dependency. (See https://github.com/python/cpython/commit/aff7a2e23bd6ed68fa15c1ceda94a2fdd7f8cf7f and https://github.com/microsoft/mimalloc/commit/93e14344c7be10f186a39f7bee998db8adcead9b.)
 - Run `buildrelease.bat`.

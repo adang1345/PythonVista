@@ -1,3 +1,7 @@
+## 2 November 2026
+
+- Rebuild 3.14.10 and 3.15.2 to fix error `The procedure entry point TryAcquireSRWLockExclusive could not be located in the dynamic link library KERNEL32.dll` on Windows Vista.
+
 ## 27 October 2026
 
 - Add 3.11.18, 3.12.16, 3.13.18, 3.14.10, and 3.15.2.
